@@ -1,0 +1,406 @@
+---
+title: "Final Project"
+author: "Anish Gupta"
+date: "2023-11-06"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float:
+      collapsed: true
+      smooth_scroll: false
+editor_options:
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(NbClust)
+library(gganimate)
+library(lubridate)
+library(plotly)
+library(RColorBrewer)
+library(factoextra)
+library(tidyr)
+library(simplevis)
+library(billboarder)
+library(sf)
+library(viridis)
+library(tmap)
+set.seed(1234)
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Read and Prepare Data 
+
+## Air Quality Dataset
+```{r read data, message=FALSE, warning=FALSE}
+air_quality <- read_csv("Air_Quality.csv")
+
+air_quality <- air_quality %>%
+mutate(Start_Date = mdy(Start_Date)) %>%
+  select(-Message)
+```
+
+## Pm2.5 by Borough
+```{r Filter for Pm2.5 by Borough, message=FALSE, warning=FALSE}
+air_quality_pm_2.5_borough <- air_quality %>%
+  filter(Name == "Fine Particulate Matter (PM2.5)", grepl("Annual Average", `Time Period`, ignore.case = TRUE), `Geo Type Name` == "Borough")
+
+#Check for null values
+#air_quality_pm_2.5_borough %>%
+  #summarise(sum_geo_place_name = sum(is.na(`Geo Place Name`)),
+            #sum_data_value = sum(is.na(`Data Value`)))
+
+```
+
+## Neighborhood Indicators Datasets
+```{r Neighborhood Indicators Datasets, message=FALSE, warning=FALSE}
+total_population_by_race_ethnicity <- read_csv("Total_Population_by_Race_Ethnicity_NYC.csv")
+median_income <- read_csv("Median_Income_NYC.csv")
+total_population <- read_csv("Total_Population.csv")
+```
+
+## NYC Shapefile Dataset
+```{r}
+nyc_cd_shape_file <- st_read("nycd_23d/nycd_23d/nycd.shp")
+```
+
+
+## Filter Total Population by Borough and for Year 2016
+```{r Total Population by Borough and for Year 2016, message=FALSE, warning=FALSE}
+total_population_filtered <- total_population %>%
+  filter(TimeFrame == 2016, Location %in% c("Bronx", "Brooklyn", "Manhattan", "Queens", "Staten Island")) %>%
+  select(-TimeFrame, -DataFormat, -Fips)
+```
+
+## Filter datasets
+```{r Filter datasets, message=FALSE, warning=FALSE}
+air_quality_filtered <- air_quality %>%
+  filter(`Time Period` == "Annual Average 2016", `Geo Type Name` == "CD", Name == "Fine Particulate Matter (PM2.5)")
+
+median_income_filtered <- median_income %>%
+  filter( `Household Type`== "All Households", TimeFrame == "2016", !Location %in% c("Bronx", "Brooklyn", "Manhattan", "Queens", "Staten Island", "New York City"))
+
+total_population_by_race_ethnicity_filtered <- total_population_by_race_ethnicity %>%
+  filter(TimeFrame == "2016", !Location %in% c("Bronx", "Brooklyn", "Manhattan", "Queens", "Staten Island", "New York City"), DataFormat == "Percent")
+
+total_population_by_race_ethnicity_wider <- total_population_by_race_ethnicity_filtered %>% 
+  pivot_wider(
+    names_from = c(`Race/Ethnicity`), 
+    values_from = Data
+  )
+
+```
+
+
+## Join datasets
+```{r Join datasets, message=FALSE, warning=FALSE}
+nyc_population_income <- median_income_filtered %>% full_join( total_population_by_race_ethnicity_wider,by = c('Fips'='Fips', 'Location' = 'Location', 'TimeFrame' = 'TimeFrame'))
+
+nyc_population_income_filtered <- nyc_population_income %>%
+  select(-`Household Type`, -DataFormat.x, -DataFormat.y) %>%
+  rename("Average_Household_Income" = "Data")
+
+nyc_population_income_pm2.5 <- air_quality_filtered%>% full_join(nyc_population_income_filtered,by = c('Geo Join ID'='Fips'))
+
+nyc_population_income_pm2.5_filtered <- nyc_population_income_pm2.5 %>%
+  select(-`Unique ID`, -`Indicator ID`, -Name, -Measure, -`Measure Info`, -`Time Period`, -Start_Date, -Location, -TimeFrame) %>%
+  rename("mean_pm2_mcg_per_cubic_meter" = "Data Value")
+
+pm2.5_map <- nyc_population_income_pm2.5_filtered %>% left_join( nyc_cd_shape_file, 
+        by=c(`Geo Join ID`="BoroCD"))
+
+```
+
+# Air Quality in Graphs
+
+## Map of PM2.5 by NYC CD
+```{r Maps, message=FALSE, warning=FALSE}
+
+pm2.5_map %>%
+  ggplot() +
+  geom_sf(aes(geometry = geometry,fill = mean_pm2_mcg_per_cubic_meter)) +
+  scale_fill_viridis(discrete = FALSE)
+pm2.5_map = st_as_sf(pm2.5_map)
+
+pm2.5_map = st_as_sf(pm2.5_map, crs=st_crs(PolOnly))
+
+tm_shape(pm2.5_map) +
+  tm_polygons("mean_pm2_mcg_per_cubic_meter", id = "Geo Place Name", palette = "Blues") +
+  #tm_layout("PM2.5 levels in NYC Community Districts") + 
+  tmap_mode("view")
+```
+
+The above map shows PM2.5 levels in NYC Community Districts
+
+Looking at PM2.5 levels in different community districts, CDs with the highest PM2.5 levels are in Manhattan followed by some CDs in Brooklyn, Queens and Bronx. What could be the cause of this?
+
+## Map of Traffic Density
+```{r Map of Traffic Density, message=FALSE, warning=FALSE}
+air_quality_traffic <- air_quality %>%
+  filter(Name == "Traffic Density- Annual Vehicle Miles Traveled", `Geo Type Name` == "CD", `Time Period`==2016)
+
+pm2.5_traffic_map <- air_quality_traffic %>% left_join( nyc_cd_shape_file, 
+        by=c(`Geo Join ID`="BoroCD"))
+
+pm2.5_traffic_map = st_as_sf(pm2.5_traffic_map)
+
+pm2.5_traffic_map = st_as_sf(pm2.5_traffic_map, crs=st_crs(PolOnly))
+
+
+tm_shape(pm2.5_traffic_map) +
+  tm_polygons("Data Value", id = "Geo Place Name", palette = "Reds") +
+  #tm_layout("Traffic-Density Annual Vehicle Million Miles Traveled Per km2") + 
+  tmap_mode("view")
+
+
+```
+
+The above map shows the Traffic-Density Annual Vehicle Million Miles Traveled Per km2
+
+According to the NYC.gov EH data portal, traffic is a major source of PM2.5. So I looked at the traffic information. Unfortunately the latest information I have is from 2016. It does show that Manhattan CDs have the highest levels of traffic.
+
+
+## PM2.5 by Borough time Series
+```{r Pm2.5 by Borough, message=FALSE, warning=FALSE}
+air_quality_pm_2.5_borough_animated <- air_quality_pm_2.5_borough %>%
+  ggplot(aes(Start_Date, `Data Value`, color = `Geo Place Name`)) +
+  ggtitle("PM2.5 by Borough Over Time") +
+  xlab("Year") +
+  ylab("Fine Particulate Matter (PM2.5)") +
+  geom_line() +
+  transition_reveal(Start_Date)
+
+air_quality_pm_2.5_borough_animated
+ggplotly(air_quality_pm_2.5_borough_animated)
+```
+
+The good news is PM2.5 levels has been constantly decreasing in all boroughs in New York City. Manhattan is the brough with the highest level of PM2.5.
+
+## PM2.5 Asthma Emergency Department Visits by Borough by children
+```{r PM2.5 Asthma Emergency Department Visits by Borough by children, message=FALSE, warning=FALSE}
+air_quality_pm_2.5_asthma_children_borough <- air_quality %>%
+  filter(Name == "PM2.5-Attributable Asthma Emergency Department Visits", Measure == "Estimated Annual Rate- Children 0 to 17 Yrs Old", `Geo Type Name` == "Borough")
+
+#Check for null values
+air_quality_pm_2.5_asthma_children_borough %>%
+  summarise(sum_geo_place_name = sum(is.na(`Geo Place Name`)),
+            sum_data_value = sum(is.na(`Data Value`)))
+
+```
+
+## Graph PM2.5 Related Asthma Emergency Room Visits for Children 
+```{r PM2.5 Related Asthma Emergency Room Visits for Children, message=FALSE, warning=FALSE}
+plot2<-air_quality_pm_2.5_asthma_children_borough %>%
+  ggplot(aes(fill = `Geo Place Name`, y = `Data Value`, x = `Time Period`)) + 
+  geom_bar(position="dodge", stat="identity", width = 0.5) +
+  xlab("Time Period") +
+  ylab("Number of Visits") +
+  ggtitle("PM2.5 Asthma Emergency Room Visits per 100,000 Children") +
+  theme(axis.text.x = element_text(angle = 45)) +
+  scale_fill_brewer(type = "qual", palette = 1)
+ggplotly(plot2)
+```
+
+
+PM2.5 attributable asthma emergency room visits for children has been decreasing in every borough. The borough with the highest number of PM2.5 attributable asthma related emergency room visits for children is Bronx.
+
+## PM2.5 Asthma Emergency Room Visits for adults by Borough by adults
+```{r PM2.5 Asthma Emergency Room Visits for adults by Borough by adults, message=FALSE, warning=FALSE}
+air_quality_pm_2.5_asthma_adult_borough <- air_quality %>%
+  filter(Name == "PM2.5-Attributable Asthma Emergency Department Visits", Measure == "Estimated Annual Rate- 18 Yrs and Older", `Geo Type Name` == "Borough")
+
+#Check for null values
+air_quality_pm_2.5_asthma_adult_borough %>%
+  summarise(sum_geo_place_name = sum(is.na(`Geo Place Name`)),
+            sum_data_value = sum(is.na(`Data Value`)))
+
+```
+
+## Graph PM2.5 Related Asthma Emergency Room Visits for Adults 
+```{r PM2.5 Related Asthma Emergency Room Visits for Adults, message=FALSE, warning=FALSE}
+plot3 <- air_quality_pm_2.5_asthma_adult_borough %>%
+  ggplot(aes(fill = `Geo Place Name`, y = `Data Value`, x = `Time Period`)) + 
+  geom_bar(position="dodge", stat="identity", width = 0.5) +
+  xlab("Time Period") +
+  ylab("Number of Visits") +
+  ggtitle("PM2.5 Asthma Emergency Room Visits per 100,000 Adults") +
+  theme(axis.text.x = element_text(angle = 45)) +
+  scale_fill_brewer(type = "qual", palette = 6)
+ggplotly(plot3)
+```
+
+
+PM2.5 attributable asthma emergency room visits for adults has been decreasing in every borough. The borough with the highest number of PM2.5 attributable asthma related emergency room visits for adults is Bronx.
+
+Overall, the number of asthma related emergency room visits is greater for children than adults.
+
+## PM2.5-Arttributable Deaths for adults 30 years or older by Borough by adults
+```{r PM2.5-Arttributable Deaths for adults 30 years or older by Borough by adults, message=FALSE, warning=FALSE}
+air_quality_pm_2.5_deaths_adult_borough <- air_quality %>%
+  filter(Name == "PM2.5-Attributable Deaths", `Geo Type Name` == "Borough")
+ 
+#Check for null values
+air_quality_pm_2.5_deaths_adult_borough %>%
+  summarise(sum_geo_place_name = sum(is.na(`Geo Place Name`)),
+            sum_data_value = sum(is.na(`Data Value`)))
+```
+
+## PM2.5-Attributable Deaths of Adults by Borough 
+```{r 2.5-Attributable Deaths of Adults by Borough, message=FALSE, warning=FALSE}
+plot4 <- air_quality_pm_2.5_deaths_adult_borough %>%
+  ggplot(aes(fill = `Geo Place Name`, y = `Data Value`, x = `Time Period`)) + 
+  geom_bar(position="dodge", stat="identity",width = 0.5) +
+  xlab("Time Period") +
+  ylab("Number of Deaths") +
+  ggtitle("PM2.5-Attributable Deaths per 100,000 Adults by Borough") +
+  theme(axis.text.x = element_text(angle = 45)) +
+  scale_fill_brewer(type = "qual", palette = 6)
+ggplotly(plot4)
+```
+
+
+PM2.5-Attributable Deaths per 100,000 Adults has been decreasing in each borough. The two boroughs with the highest number of PM2.5 attribuatble deaths per 100,000 adults is Bronx and Staten Island.
+
+
+
+## Donut Chart Showing the Population by Boroughs
+```{r Population by Boroughs for 2016, message=FALSE, warning=FALSE}
+#Donut Chart
+billboarder() %>% 
+  bb_donutchart(total_population_filtered) %>% 
+  bb_legend(position = 'right') %>%
+  bb_data(labels = TRUE) %>%
+  bb_title("Population by Borough for 2016") %>%
+  bb_color(palette = RColorBrewer::brewer.pal(5,"Set2"))
+```
+
+## Filter median_income by Borough for Year 2016
+```{r median_income by Borough for Year 2016, message=FALSE, warning=FALSE}
+median_income_filtered <- median_income %>%
+  filter(TimeFrame == 2016, Location %in% c("Bronx", "Brooklyn", "Manhattan", "Queens", "Staten Island"), `Household Type` == "All Households") %>%
+  select(-TimeFrame, -`Household Type`, -DataFormat, -Fips)
+
+```
+
+
+## Bar Graph Showing Median Household Income for 2016 by Borough
+```{r Median Household Income for 2016 by Borough, message=FALSE, warning=FALSE}
+plot6 <- median_income_filtered %>%
+  ggplot(aes(fill = Location, y = Data, x = reorder(Location,-Data))) + 
+  geom_bar(stat = "identity", width = 0.5) +
+  xlab("") +
+  ylab("Median Household Income") +
+  ggtitle("Median Household Income for 2016") +
+  #theme(axis.text.x = element_text(angle = 90)) +
+  scale_fill_brewer(type = "qual", palette = 1)
+ggplotly(plot6)
+```
+
+
+We can see from the above bar graph that the borough with the lowest median household income for 2016 is Bronx. Therefor the borough with the highest PM2.5 attributable hospital visits is also the borough with the lowest income.
+
+## Population by Race by Borough
+```{r Population by Race by Borough, message=FALSE, warning=FALSE}
+total_population_by_race_ethnicity_filtered <- total_population_by_race_ethnicity %>%
+  filter(TimeFrame == 2016, Location %in% c("Bronx", "Brooklyn", "Manhattan", "Queens", "Staten Island"), DataFormat == "Number") %>%
+  select(-TimeFrame, -DataFormat, -Fips)
+
+```
+
+
+## Population by Race and Borough for 2016
+```{r Population by Race and Borough for 2016, message=FALSE, warning=FALSE}
+plot7 <- total_population_by_race_ethnicity_filtered %>%
+  ggplot(aes(fill = `Race/Ethnicity`, y = Data, x = Location)) + 
+  geom_bar(position="dodge", stat="identity",width = 0.7) +
+  xlab("") +
+  ylab("Population") +
+  ggtitle("Population by Race and Borough for 2016") +
+  theme(axis.text.x = element_text(angle = 45)) +
+  scale_fill_brewer(type = "qual", palette = 2)
+ggplotly(plot7)
+```
+
+
+The borough with the lowest income is Bronx and has high population of people that are Hispanic or Latino.
+
+
+# Cluster Analysis
+
+## K means clustering
+```{r K means clustering, message=FALSE, warning=FALSE}
+kmeans_data <- nyc_population_income_pm2.5_filtered %>% 
+  select(-`Geo Type Name`, -`Geo Place Name`) %>%
+  scale()
+
+#Scree plot to determine how many kmeans centers to use
+wss<- (nrow(kmeans_data)-1)*sum(apply(kmeans_data,2,var))
+for (i in 2:20) wss[i]<-sum(kmeans(kmeans_data,centers=i)$withinss)
+
+plot(1:20, wss, type="b", xlab="Number of Clusters", ylab="Within group sum of squares")
+
+fit.km <- kmeans(kmeans_data, 4, iter.max = 10,nstart=25)
+fit.km$size
+nyc_population_income_pm2.5_clustered<-nyc_population_income_pm2.5_filtered %>%
+  mutate(cluster = fit.km$cluster)
+
+```
+
+
+## Cluster Plot showing Average Household Income vs PM2.5
+```{r Cluster Plots, message=FALSE, warning=FALSE}
+nyc_population_income_pm2.5_clustered <- nyc_population_income_pm2.5_clustered %>%
+  mutate(`Asian and Pacific Islander` = scales::percent(`Asian and Pacific Islander`),
+         Black = scales::percent(Black),
+         `Hispanic or Latino` = scales::percent(`Hispanic or Latino`),
+         White = scales::percent(White),
+         `Combination or Another Race` = scales::percent(`Combination or Another Race`),
+         `Native American` = scales::percent(`Native American`))
+
+
+plotly_data1 <- nyc_population_income_pm2.5_clustered %>%
+  mutate(fancy_label = paste0(`Geo Place Name`, "<br>", 
+                             "$",Average_Household_Income,"<br>", 
+                             mean_pm2_mcg_per_cubic_meter, " mcg per cubic meter", "<br>",
+                             `Asian and Pacific Islander`," Asian/Pacific Islander", "<br>",
+                             Black, " Black", "<br>",
+                             `Hispanic or Latino`, " Hispanic/Latino", "<br>",
+                             White, " White", "<br>",
+                             `Combination or Another Race`, " Combination/Another Race", "<br>",
+                             `Native American`, " Native American"))
+  
+plot <-plotly_data1 %>%
+  ggplot(aes(x = Average_Household_Income,y = mean_pm2_mcg_per_cubic_meter, color = as.factor(cluster)))+
+  xlab("Average Household Income") +
+  ylab("Mean PM2.5 MCG Per Cubic Meter") +
+  ggtitle("Household Income VS PM2.5 by Cluster") +
+  geom_point(aes(text = fancy_label)) +
+  labs(col = "Clusters")
+ggplotly(plot, tooltip = "text")
+```
+
+The K-mean cluster plot shows that most of the community districts with higher level of PM2.5 are in Manhattan which is the second highest borough in terms of income. However it is important to note that the community districts in Manhattan that have lower levels of PM2.5 have the highest income. Lower income CDs in Manhattan have high levels of PM2.5.
+
+## K-mean clusters mapped on NYC shapefile.
+```{r Cluster Plot NYC shapefile, message=FALSE, warning=FALSE}
+#Join nyc_population_income_pm2.5_clustered with nyc shape file
+pm2.5_cluster_map <- nyc_population_income_pm2.5_clustered %>% left_join( nyc_cd_shape_file, 
+        by=c(`Geo Join ID`="BoroCD"))
+
+pm2.5_cluster_map = st_as_sf(pm2.5_cluster_map)
+
+pm2.5_cluster_map = st_as_sf(pm2.5_cluster_map, crs=st_crs(PolOnly))
+
+tm_shape(pm2.5_cluster_map) +
+  tm_polygons("cluster", id = "Geo Place Name", palette = "Greens") +
+  #tm_layout("PM2.5 levels in NYC Community Districts") + 
+  tmap_mode("view")
+
+
+```
+
+Plotting the clusters from K mean, shows that CDs with similar characteristics in terms of income, ethnicity and PM2.5 levels are grouped together in similar nearby neighborhoods. Manhattan in cluster 3 has higher PM2.5 levels.
+
+
